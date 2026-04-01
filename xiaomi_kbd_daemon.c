@@ -5,7 +5,7 @@
  * them through a uinput virtual device so Android's InputReader can see them.
  *
  * Target: Xiaomi Pad 7 Pro, crDroid (AOSP), arm64-v8a
- * Keyboard: vendor=0x15d9, product=0x00a3 (German QWERTZ layout)
+ * Keyboard: vendor=0x15d9, product=0x00a3
  */
 
 #include <dirent.h>
@@ -93,7 +93,7 @@ static int open_input_device(void) {
         return -1;
     }
 
-    /* Grab the device so the (broken) xiaomi_keyboard handler can't interfere */
+    /* Grab the device so the xiaomi_keyboard handler can't interfere */
     if (ioctl(fd, EVIOCGRAB, 1) < 0) {
         LOGE("EVIOCGRAB: %s (continuing without grab)", strerror(errno));
     }

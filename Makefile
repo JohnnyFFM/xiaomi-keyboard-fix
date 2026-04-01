@@ -35,12 +35,12 @@ clean:
 # Push binary + service script to device via adb
 push: $(TARGET)
 	adb push $(TARGET) /data/local/tmp/
-	adb push xiaomi_kbd_service.sh /data/local/tmp/
+	adb push magisk/service.d/xiaomi_kbd_service.sh /data/local/tmp/
 	@echo "Files pushed. Run 'make install' to install to Magisk service.d"
 
 install: push
 	adb shell "su -c 'cp /data/local/tmp/$(TARGET) /data/adb/service.d/$(TARGET)'"
-	adb shell "su -c 'cp /data/local/tmp/xiaomi_kbd_service.sh /data/adb/service.d/xiaomi_kbd_service.sh'"
+	adb shell "su -c 'cp /data/local/tmp/xiaomi_kbd_service.sh /data/adb/service.d/'"
 	adb shell "su -c 'chmod 755 /data/adb/service.d/$(TARGET)'"
 	adb shell "su -c 'chmod 755 /data/adb/service.d/xiaomi_kbd_service.sh'"
 	@echo "Installed. Reboot device or run the service script manually."
