@@ -1,10 +1,10 @@
 # Xiaomi Pro Keyboard Fix for Custom ROMs
 
-Makes the Xiaomi Pro Keyboard work on custom ROMs (crDroid, LineageOS, etc.) where Android disables it at boot.
+Makes the Xiaomi Pro Keyboard work on custom ROMs where Android disables it at boot.
 
 ## Problem
 
-On non-MIUI ROMs, the Xiaomi Pro Keyboard connects via pogo pins and is detected by the kernel, but Android's InputReader marks it as `Enabled: false`. Without Xiaomi's proprietary userspace daemon, keystrokes are silently discarded.
+The Xiaomi Pro Keyboard connects via pogo pins and is detected by the kernel, but Android's InputReader marks it as `Enabled: false`. Keystrokes are silently discarded.
 
 You can verify this with:
 
@@ -16,14 +16,13 @@ If it shows `Enabled: false`, this fix will help.
 
 ## Solution
 
-A single HID unbind/rebind after boot forces Android to re-evaluate the device and enable it. That's it — no daemon, no binary, just a shell script.
+A HID unbind/rebind after boot forces Android to re-evaluate the device and enable it. No daemon, no binary, just a shell script.
 
 ## Install
 
 ### Prerequisites
 
 - Magisk (for root and `service.d` boot scripts)
-- Xiaomi tablet with pogo-pin keyboard
 
 ### 1. Install the boot script
 
@@ -33,7 +32,7 @@ adb shell "su -c 'cp /data/local/tmp/xiaomi_kbd_service.sh /data/adb/service.d/'
 adb shell "su -c 'chmod 755 /data/adb/service.d/xiaomi_kbd_service.sh'"
 ```
 
-### 2. Install the IDC config (optional)
+### 2. Install the IDC config
 
 Fixes arrow keys being rotated in landscape mode:
 
@@ -61,13 +60,13 @@ adb logcat -s xiaomi_kbd
 
 ## How It Works
 
-The Xiaomi Pro Keyboard registers as a HID device via the Nanosic chip controller over the pogo-pin interface. On boot, the kernel loads `nanosic_driver` and `xiaomi_keyboard_driver`, which register the keyboard as `/dev/input/eventX`.
+The Xiaomi Pro Keyboard registers as a HID device via the Nanosic controller chip over the pogo-pin interface. On boot, the kernel loads `nanosic_driver` and `xiaomi_keyboard_driver`, which register the keyboard as `/dev/input/eventX`.
 
-However, Android's InputReader disables the device — likely because Xiaomi's proprietary `keyboardnanoapp_aidl-service` is missing on custom ROMs. This service normally communicates with the Nanosic chip via `/dev/nanodev0`.
-
-A HID unbind/rebind (`echo <device> > /sys/bus/hid/drivers/hid-generic/unbind` + `bind`) forces the HID subsystem to re-register the device. Android's InputReader then re-evaluates it and sets `Enabled: true`, making the keyboard functional.
+However, Android's InputReader disables the device at boot. The exact cause is unclear — it could be a timing issue during boot, a missing software component, or an Android policy decision. A HID unbind/rebind forces the device to re-register, and Android then enables it.
 
 The boot script waits for `sys.boot_completed` before performing the rebind to ensure Android's input system is ready.
+
+The IDC file sets `keyboard.orientationAware = 0` to prevent arrow keys from rotating with the screen orientation in landscape mode.
 
 ## Repository Structure
 
@@ -89,16 +88,15 @@ The boot script waits for `sys.boot_completed` before performing the rebind to e
 - **ROM:** crDroid (Android 16)
 - **Keyboard:** Xiaomi Pro Keyboard (vendor=0x15d9, product=0x00a3)
 
-May also work on other Xiaomi tablets with pogo-pin keyboards (Pad 7, Pad 6S Pro, etc.).
+May also work on other Xiaomi tablets with pogo-pin keyboards.
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
 | Keyboard not working after reboot | Check `adb logcat -s xiaomi_kbd` for errors |
-| `Xiaomi keyboard HID device not found` | Keyboard may not be attached, or different vendor/product IDs |
+| `Xiaomi keyboard HID device not found` | Keyboard not attached or different vendor/product IDs |
 | Arrow keys rotated in landscape | Install the IDC Magisk module (step 2) |
-| Wrong characters | Set keyboard language in Android Settings > System > Languages & Input |
 
 ## License
 
