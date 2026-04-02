@@ -14,7 +14,7 @@ STRIP = $(NDK_TOOLCHAIN)/bin/llvm-strip
 # --- Build flags ---
 CFLAGS = -Wall -Wextra -Werror -O2 -DNDEBUG
 # Static link so we have zero runtime dependencies on the device
-LDFLAGS = -static
+LDFLAGS = -static -pthread
 
 TARGET = xiaomi_kbd_daemon
 SRC = xiaomi_kbd_daemon.c

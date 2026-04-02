@@ -1,31 +1,30 @@
 # Xiaomi Pogo Keyboard Daemon
 
-A minimal userspace daemon that bridges the Xiaomi pogo-pin keyboard to Android's input stack on AOSP-based ROMs (crDroid, LineageOS, etc.).
+A minimal userspace daemon that makes the Xiaomi pogo-pin keyboard work on AOSP-based ROMs (crDroid, LineageOS, etc.).
 
 ## Problem
 
 On AOSP-based ROMs, the Xiaomi Pad 7 Pro's pogo-pin keyboard (`vendor=0x15d9`, `product=0x00a3`) doesn't work out of the box:
 
 - The kernel module `xiaomi_keyboard_driver` registers an input handler that intercepts keyboard events
-- Without Xiaomi's proprietary userspace daemon, Android's InputReader disables the device (`Enabled: false`)
-- The keyboard appears in `/proc/bus/input/devices` but produces no output
+- Without Xiaomi's proprietary userspace daemon (`keyboardnanoapp_aidl-service`), Android's InputReader disables the device
+- The Nanosic keyboard controller chip requires an active client reading from `/dev/nanodev0` — without it, the chip hangs and stops delivering key events
 
 ## Solution
 
-This daemon:
+This daemon does two things:
 
-1. Opens the physical keyboard device (`/dev/input/eventX`) — auto-detected by vendor/product ID
-2. Creates a virtual device via `/dev/uinput` that mimics the keyboard
-3. Forwards all raw `input_event` structs from the physical device to the virtual device
-4. Runs as a persistent background service via Magisk's `service.d`
-5. Survives keyboard dock/undock — rescans `/dev/input/` on reconnect
+1. **Event forwarding:** Opens the physical keyboard device (`/dev/input/eventX`), grabs it via `EVIOCGRAB`, creates a virtual device via `/dev/uinput`, and forwards all events 1:1
+2. **Nanodev drain:** Keeps `/dev/nanodev0` open and continuously reads from it, which registers a client with the Nanosic chip driver and prevents the chip from hanging
 
-The daemon is layout-agnostic — it forwards raw keycodes without remapping. Keyboard layout (QWERTZ, QWERTY, etc.) is handled by Android's `.kcm`/`.kl` files separately.
+The daemon auto-detects the keyboard by vendor/product ID, survives dock/undock cycles, and restarts automatically on errors.
+
+It is layout-agnostic — keyboard layout (QWERTZ, QWERTY, etc.) is handled by Android's system settings.
 
 ## Repository Structure
 
 ```
-├── xiaomi_kbd_daemon.c              # Daemon source (pure C)
+├── xiaomi_kbd_daemon.c              # Daemon source (pure C, ~290 lines)
 ├── Makefile                         # NDK cross-compilation
 ├── magisk/
 │   ├── service.d/
@@ -86,7 +85,7 @@ adb shell "su -c 'chmod 755 /data/adb/service.d/xiaomi_kbd_service.sh'"
 
 ### 3. Install the Magisk IDC module
 
-This module sets `keyboard.orientationAware = 0` so arrow keys don't rotate with the screen. Without it, arrow keys are swapped in landscape mode.
+This sets `keyboard.orientationAware = 0` so arrow keys don't rotate with the screen in landscape mode.
 
 ```bash
 adb push magisk/keyboard_fix /data/local/tmp/keyboard_fix
@@ -102,8 +101,6 @@ adb reboot
 
 ### Quick Test (without reboot)
 
-Run the daemon in foreground to test immediately:
-
 ```bash
 adb push xiaomi_kbd_daemon /data/local/tmp/
 adb shell "su -c '/data/local/tmp/xiaomi_kbd_daemon -f'"
@@ -112,8 +109,6 @@ adb shell "su -c '/data/local/tmp/xiaomi_kbd_daemon -f'"
 Press `Ctrl+C` to stop.
 
 ## Verify
-
-After reboot, check that everything is working:
 
 ```bash
 # Daemon is running
@@ -129,16 +124,20 @@ adb shell "su -c 'cat /data/local/tmp/xiaomi_kbd_daemon.log'"
 ## How It Works
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│ Xiaomi Keyboard │     │ xiaomi_kbd_daemon │     │ Android          │
-│ (pogo pins)     │────▶│                  │────▶│ InputReader      │
-│                 │     │ read(event6)     │     │                  │
-│ /dev/input/     │     │ write(uinput)    │     │ /dev/input/      │
-│   event6        │     │                  │     │   event17        │
-└─────────────────┘     └──────────────────┘     └──────────────────┘
-     physical               EVIOCGRAB              virtual device
-     device                 forwards all           seen by Android
-                            events 1:1
+                          xiaomi_kbd_daemon
+                         ┌─────────────────────────┐
+┌──────────────┐         │  ┌─────────────────┐    │     ┌──────────────┐
+│ Xiaomi Pogo  │         │  │ Event forwarder │    │     │ Android      │
+│ Keyboard     │────────▶│  │ read(eventX)    │────────▶│ InputReader  │
+│ /dev/input/  │ EVIOCGRAB  │ write(uinput)   │    │     │ /dev/input/  │
+│   eventX     │         │  └─────────────────┘    │     │   eventY     │
+└──────────────┘         │  ┌─────────────────┐    │     └──────────────┘
+                         │  │ Nanodev drain   │    │
+┌──────────────┐         │  │ read + discard  │    │
+│ Nanosic chip │◀───────▶│  │ (keeps client   │    │
+│ /dev/nanodev0│         │  │  registered)    │    │
+└──────────────┘         │  └─────────────────┘    │
+                         └─────────────────────────┘
 ```
 
 ## Troubleshooting
@@ -148,7 +147,7 @@ adb shell "su -c 'cat /data/local/tmp/xiaomi_kbd_daemon.log'"
 | Daemon not starting | Check `cat /data/local/tmp/xiaomi_kbd_daemon.log` |
 | Keyboard not detected | Verify with `cat /proc/bus/input/devices \| grep 15d9` |
 | Arrow keys rotated in landscape | Install the IDC Magisk module (step 3) |
-| Wrong characters | Set the correct keyboard language in Android Settings → System → Languages & Input |
+| Wrong characters | Set keyboard language in Android Settings > System > Languages & Input |
 | Daemon dies on undock | Expected — it auto-restarts when keyboard is re-docked |
 
 ## Tested On

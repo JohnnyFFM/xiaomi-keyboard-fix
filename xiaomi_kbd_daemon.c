@@ -4,6 +4,9 @@
  * Reads raw input events from the physical keyboard device and forwards
  * them through a uinput virtual device so Android's InputReader can see them.
  *
+ * Also keeps /dev/nanodev0 open and drained to maintain a client registration
+ * with the Nanosic chip driver, which prevents the chip from hanging.
+ *
  * Target: Xiaomi Pad 7 Pro, crDroid (AOSP), arm64-v8a
  * Keyboard: vendor=0x15d9, product=0x00a3
  */
@@ -13,6 +16,7 @@
 #include <fcntl.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +28,7 @@
 
 #define UINPUT_DEVICE  "/dev/uinput"
 #define INPUT_DIR      "/dev/input"
+#define NANODEV_PATH   "/dev/nanodev0"
 
 #define DEVICE_NAME    "Xiaomi Pogo Keyboard (Virtual)"
 #define VENDOR_ID      0x15d9
@@ -42,6 +47,54 @@ static volatile sig_atomic_t g_running = 1;
 static void signal_handler(int sig) {
     (void)sig;
     g_running = 0;
+}
+
+/* ----------------------------------------------------------------
+ * Nanodev drain thread
+ *
+ * Opening /dev/nanodev0 registers a client with the Nanosic chip
+ * driver. Without a registered client, the chip hangs after a while
+ * and stops delivering keyboard events. On stock MIUI, Xiaomi's
+ * keyboardnanoapp AIDL service fills this role. We simply keep the
+ * device open and drain incoming data to prevent buffer buildup.
+ * ---------------------------------------------------------------- */
+static void *nanodev_drain_thread(void *arg) {
+    (void)arg;
+    unsigned char buf[256];
+
+    LOGI("nanodev drain thread started");
+
+    while (g_running) {
+        int fd = open(NANODEV_PATH, O_RDONLY);
+        if (fd < 0) {
+            LOGE("nanodev open %s: %s", NANODEV_PATH, strerror(errno));
+            sleep(RETRY_DELAY_SEC);
+            continue;
+        }
+
+        LOGI("nanodev client registered on %s", NANODEV_PATH);
+
+        while (g_running) {
+            ssize_t n = read(fd, buf, sizeof(buf));
+            if (n < 0) {
+                if (errno == EINTR)
+                    continue;
+                LOGE("nanodev read: %s", strerror(errno));
+                break;
+            }
+            if (n == 0)
+                break;
+            /* Data read and discarded */
+        }
+
+        close(fd);
+
+        if (g_running)
+            sleep(RETRY_DELAY_SEC);
+    }
+
+    LOGI("nanodev drain thread exiting");
+    return NULL;
 }
 
 /*
@@ -251,6 +304,14 @@ int main(int argc, char *argv[]) {
         daemonize();
 
     LOGI("daemon starting (pid=%d)", getpid());
+
+    /* Start nanodev drain thread to maintain client registration */
+    pthread_t nano_thread;
+    if (pthread_create(&nano_thread, NULL, nanodev_drain_thread, NULL) != 0) {
+        LOGE("failed to create nanodev thread: %s", strerror(errno));
+    } else {
+        pthread_detach(nano_thread);
+    }
 
     /* Main retry loop - restart on errors */
     while (g_running) {
