@@ -1,4 +1,1 @@
-xiaomi_kbd_daemon
-*.o
-android-ndk-*/
-*.zip
+*.log
