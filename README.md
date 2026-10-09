@@ -98,18 +98,28 @@ on `odm.img`.)
 
 ### 3. Push everything and enable at boot
 
+`/data/adb` is root-only, so stage in `/tmp` and copy as root:
+
 ```sh
-su -c 'mkdir -p /data/adb/kbdauth'
-adb push midevauthd libmidevauth.so \
-         vendor.xiaomi.hardware.aidl.midevauth-V1-ndk_platform.so \
-         tokenhelper device/kbd_auth.sh /data/adb/kbdauth/
-adb push device/service.d-kbdauth.sh /data/adb/service.d/kbdauth.sh
-su -c 'chmod 755 /data/adb/kbdauth/midevauthd /data/adb/kbdauth/tokenhelper \
-               /data/adb/kbdauth/kbd_auth.sh /data/adb/service.d/kbdauth.sh'
+adb push midevauthd libmidevauth.so          vendor.xiaomi.hardware.aidl.midevauth-V1-ndk_platform.so          tokenhelper device/kbd_auth.sh          device/service.d-kbdauth.sh device/xiaomi_kbd_service.sh /data/local/tmp/
+adb shell su -c '
+  mkdir -p /data/adb/kbdauth
+  cp /data/local/tmp/{midevauthd,libmidevauth.so,vendor.xiaomi.hardware.aidl.midevauth-V1-ndk_platform.so,tokenhelper,kbd_auth.sh} /data/adb/kbdauth/
+  cp /data/local/tmp/service.d-kbdauth.sh   /data/adb/service.d/kbdauth.sh
+  cp /data/local/tmp/xiaomi_kbd_service.sh  /data/adb/service.d/xiaomi_kbd_service.sh
+  chmod 755 /data/adb/kbdauth/midevauthd /data/adb/kbdauth/tokenhelper /data/adb/kbdauth/kbd_auth.sh             /data/adb/service.d/kbdauth.sh /data/adb/service.d/xiaomi_kbd_service.sh
+'
 ```
 
-Reboot. On boot the launcher waits for the system + `/dev/nanodev0`, starts
-`midevauthd`, waits for it to register, then starts `kbd_auth.sh`.
+Two boot services get installed:
+
+* **`kbdauth.sh`** - starts the MiDevAuth HAL + the handshake bridge (the auth fix).
+* **`xiaomi_kbd_service.sh`** - **required**: on a custom ROM the Nanosic HID is
+  registered at boot but left *disabled*, so keystrokes are dropped. This watcher
+  rebinds the HID while the keyboard is connected, which re-enables it. Without
+  it the keyboard won't type even though auth succeeds.
+
+Reboot.
 
 ### 4. Verify
 
