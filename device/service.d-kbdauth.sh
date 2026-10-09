@@ -19,3 +19,7 @@ echo "$(date) daemon pid=$(pidof midevauthd) vnd=$(vndservice list 2>/dev/null |
 export HELPER="$DIR/tokenhelper"
 setsid "$DIR/kbd_auth.sh" >"$DIR/run.log" 2>&1 </dev/null &
 echo "$(date) bridge launched" >> "$KLOG"
+
+# LEDs: Caps Lock + keyboard backlight (dev)
+setsid "$DIR/kbd_leds.sh" >"$DIR/leds_run.log" 2>&1 </dev/null &
+echo "$(date) leds launched" >> "$KLOG"
