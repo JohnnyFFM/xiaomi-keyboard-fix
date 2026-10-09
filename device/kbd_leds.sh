@@ -20,6 +20,8 @@ BACKLIGHT=1
 BL_CMD=23
 KBD_BL_MAX=255
 BL_POLL=2
+CAPS_REASSERT=2          # re-send caps-ON every N s (keyboard drops the LED on sleep/typing)
+CAPSF=$DIR/caps.state
 # ------------------------------------------------------------------------
 
 mkdir -p "$DIR"
@@ -73,9 +75,9 @@ send_feature() {   # $1=cmd hex, $2=value hex  -> short-data feature frame
 logline "## kbd_leds start (caps cmd=$CAPS_CMD on=$CAPS_ON off=$CAPS_OFF; backlight=$BACKLIGHT)"
 
 # find the keyboard input event device (for LED_CAPSL); empty => getevent watches all
-EVDEV=$(awk 'BEGIN{RS="";FS="\n"}
-  /15[dD]9|[Kk]eyboard/ { for(i=1;i<=NF;i++) if($i ~ /Handlers=/){ if(match($i,/event[0-9]+/)) { print "/dev/input/" substr($i,RSTART,RLENGTH); exit } } }' \
-  /proc/bus/input/devices 2>/dev/null)
+EVDEV=$(getevent -pl 2>/dev/null | awk '/^add device /{dev=$4} /LED_CAPSL/{print dev; exit}')
+[ -n "$EVDEV" ] || EVDEV=$(awk 'BEGIN{RS="";FS="
+"} /Name="[^"]*[Kk]eyboard"/{for(i=1;i<=NF;i++) if($i ~ /Handlers=/ && match($i,/event[0-9]+/)) {print "/dev/input/" substr($i,RSTART,RLENGTH); exit}}' /proc/bus/input/devices 2>/dev/null)
 logline "caps: EVDEV=${EVDEV:-<all>}"
 
 # Caps Lock watcher: react to EV_LED/LED_CAPSL the kernel emits on each toggle
@@ -85,10 +87,20 @@ logline "caps: EVDEV=${EVDEV:-<all>}"
           *LED_CAPSL*)
               val=$(echo "$line" | awk '{print $NF}')
               case "$val" in
-                  00000000|0) send_feature "$CAPS_CMD" "$CAPS_OFF"; logline "caps OFF" ;;
-                  *)          send_feature "$CAPS_CMD" "$CAPS_ON";  logline "caps ON"  ;;
+                  00000000|0) echo off > "$CAPSF"; send_feature "$CAPS_CMD" "$CAPS_OFF"; logline "caps OFF" ;;
+                  *)          echo on  > "$CAPSF"; send_feature "$CAPS_CMD" "$CAPS_ON";  logline "caps ON"  ;;
               esac ;;
       esac
+  done
+) &
+
+# Keep-alive: the keyboard firmware drops the Caps LED on sleep/typing, and the
+# kernel only emits LED_CAPSL on a state change, so periodically re-assert ON.
+echo off > "$CAPSF"
+(
+  while true; do
+      [ "$(cat "$CAPSF" 2>/dev/null)" = "on" ] && send_feature "$CAPS_CMD" "$CAPS_ON"
+      sleep "$CAPS_REASSERT"
   done
 ) &
 
@@ -104,10 +116,11 @@ if [ "$BACKLIGHT" = "1" ]; then
       case "$p" in ''|*[!0-9]*) sleep "$BL_POLL"; continue;; esac
       lvl=$(( p * KBD_BL_MAX / PMAX ))
       [ $lvl -gt $KBD_BL_MAX ] && lvl=$KBD_BL_MAX
-      if [ "$lvl" != "$last" ]; then
+      # re-assert every poll while lit (keyboard drops backlight on sleep, like the Caps LED);
+      # when dark, send once on the transition and then stop.
+      if [ "$lvl" != "$last" ] || [ "$lvl" -gt 0 ]; then
         send_feature "$BL_CMD" "$(printf '%02x' $lvl)"
-        logline "backlight pad=$p kbd=$lvl"
-        last=$lvl
+        [ "$lvl" != "$last" ] && { logline "backlight pad=$p kbd=$lvl"; last=$lvl; }
       fi
       sleep "$BL_POLL"
     done
