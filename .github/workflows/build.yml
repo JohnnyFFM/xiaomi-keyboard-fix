@@ -1,0 +1,59 @@
+name: build-tokenhelper
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      BT: "34.0.0"
+      NDK_VER: "26.3.11579264"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install matching build-tools + NDK (they ship the AIDL-NDK C++ headers)
+        run: |
+          set -euxo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          SDKM="$(ls "$SDK"/cmdline-tools/*/bin/sdkmanager | head -1)"
+          echo "SDK=$SDK SDKM=$SDKM"
+          yes | "$SDKM" --licenses >/dev/null 2>&1 || true
+          "$SDKM" "build-tools;${BT}" "ndk;${NDK_VER}"
+          test -x "$SDK/build-tools/${BT}/aidl"
+          test -d "$SDK/ndk/${NDK_VER}"
+          ls "$SDK/ndk/${NDK_VER}"/toolchains/llvm/prebuilt/*/sysroot/usr/include/android/binder_interface_utils.h
+
+      - name: Generate NDK AIDL stubs + compile (arm64)
+        run: |
+          set -euxo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          AIDL="$SDK/build-tools/${BT}/aidl"
+          NDK="$SDK/ndk/${NDK_VER}"
+          BIN="$(ls -d "$NDK"/toolchains/llvm/prebuilt/*/bin | head -1)"
+          CXX="$BIN/aarch64-linux-android31-clang++"
+          test -x "$CXX"
+          mkdir -p gen
+          "$AIDL" --lang=ndk --structured --stability=vintf             -I aidl -o gen -h gen             aidl/vendor/xiaomi/hardware/aidl/midevauth/IMidevauthService.aidl
+          echo "=== generated ==="; find gen -type f
+          "$CXX" -std=c++17 -O2 -Wall -fPIE -pie -static-libstdc++             -I gen             src/tokenhelper.cpp $(find gen -name '*.cpp')             -lbinder_ndk -llog -ldl             -o tokenhelper
+          "$BIN/llvm-readelf" -h tokenhelper | head -20
+          echo "built OK"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenhelper-arm64
+          path: tokenhelper
+          if-no-files-found: error
+
+      - name: Publish Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tokenhelper
+          generate_release_notes: true

@@ -1,1 +1,6 @@
-*.log
+dl/
+gen/
+tokenhelper
+tokenhelper-arm64
+*.o
+.DS_Store

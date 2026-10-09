@@ -1,6 +1,0 @@
-id=xiaomi_pogo_keyboard
-name=Xiaomi Pogo Keyboard Fix
-version=v1.0
-versionCode=1
-author=
-description=IDC configuration for Xiaomi Pogo Pin Keyboard — disables orientation-aware arrow key rotation

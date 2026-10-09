@@ -1,103 +1,180 @@
-# Xiaomi Pro Keyboard Fix for Custom ROMs
+# Xiaomi Pad 7 Pro keyboard fix (custom ROMs)
 
-Makes the Xiaomi Pro Keyboard work on custom ROMs where Android disables it at boot.
+Make the **Xiaomi Pad 7 Pro** magnetic keyboard fully work on **crDroid / AOSP
+custom ROMs** by completing the keyboard's authentication handshake — using the
+tablet's **own TrustZone key**, no Xiaomi cloud, no secret extraction.
 
-## Problem
+> Device codename **`muyu`** (Xiaomi Pad 7 Pro, `24091RPADG`). Rooted with
+> Magisk. Tested on crDroid 12.7 (Android 16).
 
-The Xiaomi Pro Keyboard connects via pogo pins and is detected by the kernel, but Android's InputReader marks it as `Enabled: false`. Keystrokes are silently discarded.
+> ### ⚠️ New approach (this replaces the old one)
+>
+> The previous fix in this repo — a Magisk module that rebound the keyboard's
+> HID device — did **not** reliably solve the problem. It's preserved on the
+> [`legacy-hid-rebind`](../../tree/legacy-hid-rebind) branch.
+>
+> This version fixes the real cause: it **completes the keyboard's
+> authentication** using the tablet's own TrustZone key. See below.
 
-You can verify this with:
 
-```bash
-adb shell "dumpsys input" | grep -A4 "Xiaomi Keyboard"
+## The problem
+
+The Xiaomi keyboard periodically asks the tablet to authenticate (Xiaomi's
+"MiAuth"). Stock HyperOS answers with `MiDevAuthService` + the `midevauthd` HAL,
+which talk to a signed **TrustZone trustlet** holding a per-device key. Custom
+ROMs ship neither, so the handshake never completes — which can leave the
+keyboard misbehaving.
+
+You **cannot** fake the answer: the keyboard's challenge carries a random nonce
+and the response is a keyed MAC, so replaying a captured token doesn't work. The
+real key is required.
+
+## The insight
+
+On this device the **entire TrustZone path is still present under crDroid**:
+
+* `/dev/smcinvoke` + the `smcinvoke`/`qseecom_proxy` kernel modules,
+* the TEE client libs in `/vendor/lib64` (`libQSEEComAPI.so`, ...),
+* and the trustlet itself: `/vendor/firmware_mnt/image/devauth.*`.
+
+The only missing piece is Xiaomi's thin HAL daemon `midevauthd`. Copy that over,
+and it loads the trustlet and computes real tokens — **offline**, under
+**Enforcing SELinux**.
+
+## How it works
+
+```
+[keyboard] -- /dev/nanodev0 -- kbd_auth.sh -- tokenhelper --(vndbinder)--
+                                           midevauthd --(smcinvoke)-- devauth trustlet (key)
 ```
 
-If it shows `Enabled: false`, this fix will help.
+* **`midevauthd`** - Xiaomi's HAL daemon (proprietary; copied from the stock ROM,
+  not distributed here). Loads the trustlet, serves `IMidevauthService`.
+* **`tokenhelper`** - a tiny binder client (this repo; prebuilt in Releases) that
+  calls `IMidevauthService.devauth_token_get(type, uid, keyMeta, challenge)` and
+  prints the 16-byte token. A shell script can't do a binder call with byte-array
+  arguments, so this is the one native piece.
+* **`kbd_auth.sh`** - drives the keyboard handshake on `/dev/nanodev0`
+  (`AUTH_START -> STEP3 -> STEP5`) and asks `tokenhelper` for the STEP5 token.
 
-## Solution
+Two things that trip people up (both already handled by the scripts):
 
-A HID unbind/rebind after boot forces Android to re-evaluate the device and enable it. No daemon, no binary, just a shell script.
+1. `midevauthd` registers with the **vendor** servicemanager, so the client must
+   use the **vendor** `libbinder` - run `tokenhelper` with
+   `LD_LIBRARY_PATH=/vendor/lib64:/system/lib64` (binds `/dev/vndbinder`).
+2. Nothing proactively starts auth on a custom ROM, so `kbd_auth.sh` sends one
+   `AUTH_START` at launch and then answers every re-auth request.
+
+## Requirements
+
+* Xiaomi Pad 7 Pro (`muyu`) on a custom ROM that uses the **HyperOS vendor
+  blobs** (so the trustlet + TEE libs are present). Check:
+  `ls /vendor/firmware_mnt/image/devauth.*` and `ls /dev/smcinvoke`.
+* Root (Magisk).
+* `adb`.
+* Three proprietary files from a **stock HyperOS ROM for `muyu`** (see below).
 
 ## Install
 
-### Prerequisites
+### 1. Get `tokenhelper`
 
-- Magisk (for root and `service.d` boot scripts)
+Download `tokenhelper` from the [latest Release](../../releases/latest), or build
+it yourself (see *Building*). It's a static-libc++ arm64 binary; no extra runtime
+deps.
 
-### 1. Install the boot script
+### 2. Get the three Xiaomi HAL files
 
-```bash
-adb push magisk/service.d/xiaomi_kbd_service.sh /data/local/tmp/
-adb shell "su -c 'cp /data/local/tmp/xiaomi_kbd_service.sh /data/adb/service.d/'"
-adb shell "su -c 'chmod 755 /data/adb/service.d/xiaomi_kbd_service.sh'"
+These are Xiaomi proprietary and are **not** included here. Extract them from a
+stock HyperOS fastboot ROM for `muyu` (unpack `odm.img`, which is EROFS):
+
+| From the stock ROM (`odm` partition) |
+| --- |
+| `/odm/bin/midevauthd` |
+| `/odm/lib64/libmidevauth.so` |
+| `/odm/lib64/vendor.xiaomi.hardware.aidl.midevauth-V1-ndk_platform.so` |
+
+(Tools: `payload-dumper` for `payload.bin`, then `extract.erofs` / `fsck.erofs -x`
+on `odm.img`.)
+
+### 3. Push everything and enable at boot
+
+```sh
+su -c 'mkdir -p /data/adb/kbdauth'
+adb push midevauthd libmidevauth.so \
+         vendor.xiaomi.hardware.aidl.midevauth-V1-ndk_platform.so \
+         tokenhelper device/kbd_auth.sh /data/adb/kbdauth/
+adb push device/service.d-kbdauth.sh /data/adb/service.d/kbdauth.sh
+su -c 'chmod 755 /data/adb/kbdauth/midevauthd /data/adb/kbdauth/tokenhelper \
+               /data/adb/kbdauth/kbd_auth.sh /data/adb/service.d/kbdauth.sh'
 ```
 
-### 2. Install the IDC config
+Reboot. On boot the launcher waits for the system + `/dev/nanodev0`, starts
+`midevauthd`, waits for it to register, then starts `kbd_auth.sh`.
 
-Fixes arrow keys being rotated in landscape mode:
+### 4. Verify
 
-```bash
-adb push magisk/keyboard_fix /data/local/tmp/keyboard_fix
-adb shell "su -c 'mkdir -p /data/adb/modules/keyboard_fix'"
-adb shell "su -c 'cp -r /data/local/tmp/keyboard_fix/* /data/adb/modules/keyboard_fix/'"
+```sh
+su -c 'cat /data/adb/kbd/svc.log'     # daemon started, vnd=1
+su -c 'cat /data/adb/kbd/auth.log'    # "-> STEP5 sent (real token)"
+# quick HAL check (daemon must be running):
+su -c 'cd /data/adb/kbdauth; LD_LIBRARY_PATH=/vendor/lib64:/system/lib64 ./tokenhelper keyver'   # prints 2
 ```
 
-### 3. Reboot
+## Building `tokenhelper`
 
-```bash
-adb reboot
+The [GitHub Actions workflow](.github/workflows/build.yml) cross-compiles it for
+`arm64-v8a` with the Android NDK - no local toolchain needed. Pushing a tag `v*`
+also publishes a Release with the binary attached.
+
+Locally (Linux, Android SDK + NDK r26):
+
+```sh
+AIDL=$ANDROID_HOME/build-tools/34.0.0/aidl
+NDK=$ANDROID_HOME/ndk/26.3.11579264
+CXX=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang++
+$AIDL --lang=ndk --structured --stability=vintf -I aidl -o gen -h gen \
+  aidl/vendor/xiaomi/hardware/aidl/midevauth/IMidevauthService.aidl
+$CXX -std=c++17 -O2 -fPIE -pie -static-libstdc++ -I gen \
+  src/tokenhelper.cpp $(find gen -name '*.cpp') -lbinder_ndk -llog -ldl -o tokenhelper
 ```
 
-## Verify
+> NDK **r26** is used on purpose: r30 dropped the AIDL-NDK C++ wrapper headers.
+> `AServiceManager_*` isn't in the public NDK, so `tokenhelper` resolves it at
+> runtime via `dlsym` from `libbinder_ndk.so`.
 
-```bash
-# Check the keyboard is enabled
-adb shell "dumpsys input" | grep -A4 "Xiaomi Keyboard"
+## Uninstall
 
-# Check the boot script ran
-adb logcat -s xiaomi_kbd
+```sh
+su -c 'rm /data/adb/service.d/kbdauth.sh; pkill -f midevauthd; pkill -f kbd_auth.sh'
+# optional: rm -rf /data/adb/kbdauth
 ```
-
-## How It Works
-
-The Xiaomi Pro Keyboard registers as a HID device via the Nanosic controller chip over the pogo-pin interface. On boot, the kernel loads `nanosic_driver` and `xiaomi_keyboard_driver`, which register the keyboard as `/dev/input/eventX`.
-
-However, Android's InputReader disables the device at boot. The exact cause is unclear — it could be a timing issue during boot, a missing software component, or an Android policy decision. A HID unbind/rebind forces the device to re-register, and Android then enables it.
-
-The boot script waits for `sys.boot_completed` before performing the rebind to ensure Android's input system is ready.
-
-The IDC file sets `keyboard.orientationAware = 0` to prevent arrow keys from rotating with the screen orientation in landscape mode.
-
-## Repository Structure
-
-```
-├── magisk/
-│   ├── service.d/
-│   │   └── xiaomi_kbd_service.sh    # Boot script (the actual fix)
-│   └── keyboard_fix/                # Magisk module for IDC config
-│       ├── module.prop
-│       └── system/usr/idc/
-│           └── Vendor_15d9_Product_00a3.idc
-├── LICENSE
-└── README.md
-```
-
-## Tested On
-
-- **Device:** Xiaomi Pad 7 Pro
-- **ROM:** crDroid (Android 16)
-- **Keyboard:** Xiaomi Pro Keyboard (vendor=0x15d9, product=0x00a3)
-
-May also work on other Xiaomi tablets with pogo-pin keyboards.
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| Keyboard not working after reboot | Check `adb logcat -s xiaomi_kbd` for errors |
-| `Xiaomi keyboard HID device not found` | Keyboard not attached or different vendor/product IDs |
-| Arrow keys rotated in landscape | Install the IDC Magisk module (step 2) |
+* `tokenhelper` hangs -> you didn't use the vendor `libbinder`
+  (`LD_LIBRARY_PATH=/vendor/lib64:/system/lib64`), so it can't see the vendor
+  service. Confirm the daemon is registered:
+  `su -c 'vndservice list | grep midevauth'`.
+* `svc.log` shows `vnd=0` -> `midevauthd` didn't register. Check `d.log`; confirm
+  the trustlet exists (`ls /vendor/firmware_mnt/image/devauth.*`) and
+  `/dev/smcinvoke` is present.
+* `token_get FAILED` in `auth.log` -> the daemon isn't up, or the libs path is
+  wrong.
 
-## License
+## Repository layout
 
-MIT
+```
+aidl/.../IMidevauthService.aidl   reconstructed HAL interface (interface only;
+                                  order puts devauth_token_get at code 17)
+src/tokenhelper.cpp               the binder client
+device/kbd_auth.sh                the keyboard handshake driver
+device/service.d-kbdauth.sh       Magisk boot launcher
+device/start.sh                   manual (non-boot) launcher
+.github/workflows/build.yml       CI build + tagged Release
+```
+
+## Credits & license
+
+Reverse-engineered by inspecting the device's own stock components for
+interoperability/repair. No Xiaomi proprietary binaries or keys are included in
+this repository. Our code is released under the MIT License (see `LICENSE`).
