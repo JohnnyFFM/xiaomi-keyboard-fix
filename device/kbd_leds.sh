@@ -1,7 +1,8 @@
 #!/system/bin/sh
-# kbd_leds.sh - Caps Lock LED (and optional keyboard backlight) for the Xiaomi
-# Pad 7 / 7 Pro keyboard on crDroid. The keyboard HOLDS the LED once set, so we
-# simply mirror the host's state - no re-assert, toggle, or timer.
+# kbd_leds.sh - Caps Lock LED + keyboard backlight for the Xiaomi Pad 7 / 7 Pro
+# keyboard on crDroid. The keyboard holds an LED once set, so these are one-shot
+# commands triggered by the relevant keys (the key press is the activity that
+# makes the keyboard apply the change).
 DEV=/dev/nanodev0
 DIR=/data/adb/kbd
 LOG=$DIR/leds.log
@@ -11,11 +12,12 @@ LOG=$DIR/leds.log
 CAPS_CMD=2e
 CAPS_ON=fd
 CAPS_OFF=fc
-# Backlight: mirror the pad screen brightness onto the keyboard backlight.
-BACKLIGHT=1
+# Backlight (cmd 0x23, level 0-100). Driven by the keyboard's own backlight keys
+# (KBDILLUMUP/DOWN/TOGGLE), exactly like stock.
 BL_CMD=23
-KBD_BL_MAX=100          # keyboard backlight is a 0-100 scale (per stock); tune if needed
-BL_POLL=2
+BL_MAX=100
+BL_STEP=20          # % change per Up/Down press
+BL_DEFAULT=60       # level a Toggle/Up restores to from off
 
 mkdir -p "$DIR"
 while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 1; done
@@ -36,23 +38,25 @@ send_feature() {   # $1=cmd hex, $2=value hex  -> short-data feature frame
     send_frame 32 00 $body $(sum_hex $body)
 }
 
-logline "## kbd_leds start (caps cmd=$CAPS_CMD on=$CAPS_ON off=$CAPS_OFF; backlight=$BACKLIGHT)"
+logline "## kbd_leds start (caps $CAPS_CMD; backlight $BL_CMD step=$BL_STEP)"
 
-# the keyboard reporting LED_CAPSL is the one to watch
-EVDEV=$(getevent -pl 2>/dev/null | awk '/^add device /{dev=$4} /LED_CAPSL/{print dev; exit}')
-logline "caps: EVDEV=${EVDEV:-<none>}"
+# find the keyboard nodes by capability: LED_CAPSL (caps) and KBDILLUM (backlight keys)
+CAPSDEV=$(getevent -pl 2>/dev/null | awk '/^add device /{d=$4} /LED_CAPSL/{print d; exit}')
+ILLUMDEV=$(getevent -pl 2>/dev/null | awk '/^add device /{d=$4} /KEY_KBDILLUMUP/{print d; exit}')
+logline "caps EVDEV=${CAPSDEV:-<none>}  illum EVDEV=${ILLUMDEV:-<none>}"
 
-# Caps Lock: mirror Android's state (one command per change; the keyboard holds it)
+bl_send() { send_feature "$BL_CMD" "$(printf '%02x' $1)"; logline "backlight=$1"; }
+
+# --- Caps Lock: act on KEY_CAPSLOCK press (Android emits LED_CAPSL only on the
+#     NEXT key; the press itself is the activity that refreshes the LED).
 (
   cs=off
-  getevent -lq $EVDEV 2>/dev/null | while read line; do
+  getevent -lq $CAPSDEV 2>/dev/null | while read line; do
       case "$line" in
           *KEY_CAPSLOCK*DOWN*)
-              # act on the key press itself (Android emits LED_CAPSL only on the NEXT key)
               if [ "$cs" = "on" ]; then cs=off; send_feature "$CAPS_CMD" "$CAPS_OFF"; logline "caps OFF"
               else cs=on; send_feature "$CAPS_CMD" "$CAPS_ON"; logline "caps ON"; fi ;;
           *LED_CAPSL*)
-              # authoritative state - correct drift only (usually already matches)
               val=$(echo "$line" | awk '{print $NF}')
               case "$val" in
                   00000000|0) [ "$cs" != "off" ] && { cs=off; send_feature "$CAPS_CMD" "$CAPS_OFF"; logline "caps OFF (sync)"; } ;;
@@ -62,25 +66,20 @@ logline "caps: EVDEV=${EVDEV:-<none>}"
   done
 ) &
 
-# Backlight: mirror pad screen brightness onto the keyboard backlight (on change)
-if [ "$BACKLIGHT" = "1" ]; then
-  BLDIR=$(ls -d /sys/class/backlight/* 2>/dev/null | head -1)
-  if [ -n "$BLDIR" ] && [ -r "$BLDIR/brightness" ]; then
-    PMAX=$(cat "$BLDIR/max_brightness" 2>/dev/null); { [ -z "$PMAX" ] || [ "$PMAX" = "0" ]; } && PMAX=2047
-    logline "backlight: src=$BLDIR max=$PMAX kbd_max=$KBD_BL_MAX"
-    last=-1
-    while true; do
-      p=$(cat "$BLDIR/brightness" 2>/dev/null)
-      case "$p" in ''|*[!0-9]*) sleep "$BL_POLL"; continue;; esac
-      lvl=$(( p * KBD_BL_MAX / PMAX )); [ $lvl -gt $KBD_BL_MAX ] && lvl=$KBD_BL_MAX
-      if [ "$lvl" != "$last" ]; then
-        send_feature "$BL_CMD" "$(printf '%02x' $lvl)"; logline "backlight pad=$p kbd=$lvl"; last=$lvl
-      fi
-      sleep "$BL_POLL"
-    done
-  else
-    logline "backlight: no /sys/class/backlight source; disabled"; wait
-  fi
-else
-  wait
-fi
+# --- Backlight: respond to the keyboard's backlight keys (Up/Down/Toggle). ---
+(
+  bl=0; bllast=$BL_DEFAULT
+  [ -n "$ILLUMDEV" ] || { logline "backlight: no KBDILLUM device; backlight keys disabled"; exit 0; }
+  getevent -lq $ILLUMDEV 2>/dev/null | while read line; do
+      case "$line" in
+          *KEY_KBDILLUMUP*DOWN*)
+              bl=$((bl + BL_STEP)); [ $bl -gt $BL_MAX ] && bl=$BL_MAX; bllast=$bl; bl_send $bl ;;
+          *KEY_KBDILLUMDOWN*DOWN*)
+              bl=$((bl - BL_STEP)); [ $bl -lt 0 ] && bl=0; [ $bl -gt 0 ] && bllast=$bl; bl_send $bl ;;
+          *KEY_KBDILLUMTOGGLE*DOWN*)
+              if [ $bl -gt 0 ]; then bllast=$bl; bl=0; else bl=$bllast; fi; bl_send $bl ;;
+      esac
+  done
+) &
+
+wait
