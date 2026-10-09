@@ -4,3 +4,4 @@ tokenhelper
 tokenhelper-arm64
 *.o
 .DS_Store
+dl_cap.sh
