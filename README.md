@@ -173,6 +173,28 @@ device/start.sh                   manual (non-boot) launcher
 .github/workflows/build.yml       CI build + tagged Release
 ```
 
+## Experimental: Caps Lock LED + keyboard backlight (dev branch)
+
+`device/kbd_leds.sh` adds the two LED features the auth fix doesn't cover. It
+runs next to the auth bridge and is launched by the boot service on this branch.
+
+**Caps Lock LED.** The keyboard doesn't light its own Caps LED — the host must
+push the state (stock uses a short feature command: `0x2e`, `0xfd`=on/`0xfc`=off;
+"2022-MCU" units use `0x26` with `01`/`00`). The helper watches the kernel's
+`EV_LED`/`LED_CAPSL` event — emitted whenever Android toggles caps lock — and
+sends the matching command. Test: press Caps Lock; the LED should follow. If it
+doesn't, your unit may be a 2022-MCU variant — set `CAPS_CMD=26 CAPS_ON=01
+CAPS_OFF=00` at the top of the script.
+
+**Backlight ← pad brightness.** Stock drives the keyboard backlight from a light
+sensor + a HyperOS slider, neither of which exists here. Instead we mirror the
+**tablet's screen brightness** (`/sys/class/backlight`) onto the keyboard
+backlight (command `0x23` + level). Tune `KBD_BL_MAX` to your keyboard's range;
+set `BACKLIGHT=0` to disable. (Untested — needs a backlit keyboard.)
+
+Logs: `/data/adb/kbd/leds.log`. This is on the `dev` branch pending on-device
+confirmation of the exact Caps/backlight values per unit.
+
 ## Credits & license
 
 Reverse-engineered by inspecting the device's own stock components for
