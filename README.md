@@ -173,27 +173,27 @@ device/start.sh                   manual (non-boot) launcher
 .github/workflows/build.yml       CI build + tagged Release
 ```
 
-## Experimental: Caps Lock LED + keyboard backlight (dev branch)
+## Caps Lock LED + keyboard backlight (`kbd_leds.sh`, dev)
 
-`device/kbd_leds.sh` adds the two LED features the auth fix doesn't cover. It
-runs next to the auth bridge and is launched by the boot service on this branch.
+`device/kbd_leds.sh` runs next to the auth bridge and adds the two LED features
+the auth fix doesn't cover. The keyboard *holds* an LED once set, so these are
+simple one-shot commands, not continuous loops.
 
-**Caps Lock LED.** The keyboard doesn't light its own Caps LED — the host must
-push the state (stock uses a short feature command: `0x2e`, `0xfd`=on/`0xfc`=off;
-"2022-MCU" units use `0x26` with `01`/`00`). The helper watches the kernel's
-`EV_LED`/`LED_CAPSL` event — emitted whenever Android toggles caps lock — and
-sends the matching command. Test: press Caps Lock; the LED should follow. If it
-doesn't, your unit may be a 2022-MCU variant — set `CAPS_CMD=26 CAPS_ON=01
-CAPS_OFF=00` at the top of the script.
+**Caps Lock LED.** Stock pushes the state with a short feature command
+(`0x2e`, `0xfd`=on / `0xfc`=off; "2022-MCU" units use `0x26` with `01`/`00`).
+Two device quirks matter: (1) the keyboard applies an LED change only on
+keyboard *activity*, and (2) Android emits the `EV_LED`/`LED_CAPSL` event only on
+the *next* key, not on the Caps press itself. So we act on the **`KEY_CAPSLOCK`
+press** directly (toggle + send immediately — the press is the activity that
+refreshes the LED) and use `LED_CAPSL` only to correct drift. Tracks in real time.
 
-**Backlight ← pad brightness.** Stock drives the keyboard backlight from a light
-sensor + a HyperOS slider, neither of which exists here. Instead we mirror the
-**tablet's screen brightness** (`/sys/class/backlight`) onto the keyboard
-backlight (command `0x23` + level). Tune `KBD_BL_MAX` to your keyboard's range;
-set `BACKLIGHT=0` to disable. (Untested — needs a backlit keyboard.)
+**Backlight ← pad brightness.** Stock drives the backlight from a light sensor +
+a HyperOS slider; neither exists here, so we mirror the **tablet's screen
+brightness** (`/sys/class/backlight`) onto the keyboard backlight (command
+`0x23`, level **0-100** per stock). Set on change; `BACKLIGHT=0` disables it.
+(Untested here - no backlit keyboard; a backlit-unit owner should confirm.)
 
-Logs: `/data/adb/kbd/leds.log`. This is on the `dev` branch pending on-device
-confirmation of the exact Caps/backlight values per unit.
+Logs: `/data/adb/kbd/leds.log`. Config knobs are at the top of the script.
 
 ## Credits & license
 

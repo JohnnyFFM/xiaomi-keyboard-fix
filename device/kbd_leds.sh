@@ -1,15 +1,11 @@
 #!/system/bin/sh
-# kbd_leds.sh - Caps Lock LED + (optional) keyboard backlight for the Xiaomi
-# Pad 7 / 7 Pro keyboard on crDroid. Mirrors host state to the keyboard via the
-# same short feature command stock uses. Runs alongside the auth bridge.
-#
-# EXPERIMENTAL (dev branch): verify CAPS_CMD/values for your MCU and tune
-# KBD_BL_MAX on your unit. Caps Lock is the tested-priority feature.
+# kbd_leds.sh - Caps Lock LED (and optional keyboard backlight) for the Xiaomi
+# Pad 7 / 7 Pro keyboard on crDroid. The keyboard HOLDS the LED once set, so we
+# simply mirror the host's state - no re-assert, toggle, or timer.
 DEV=/dev/nanodev0
 DIR=/data/adb/kbd
 LOG=$DIR/leds.log
 
-# ---- config -------------------------------------------------------------
 # Caps Lock feature command. Newer MCUs (Pad 7/7Pro): cmd 0x2e, on=0xfd off=0xfc.
 # "2022-MCU" units instead use: CAPS_CMD=26 CAPS_ON=01 CAPS_OFF=00
 CAPS_CMD=2e
@@ -18,11 +14,8 @@ CAPS_OFF=fc
 # Backlight: mirror the pad screen brightness onto the keyboard backlight.
 BACKLIGHT=1
 BL_CMD=23
-KBD_BL_MAX=255
+KBD_BL_MAX=100          # keyboard backlight is a 0-100 scale (per stock); tune if needed
 BL_POLL=2
-CAPS_REASSERT=2          # re-send caps-ON every N s (keyboard drops the LED on sleep/typing)
-CAPSF=$DIR/caps.state
-# ------------------------------------------------------------------------
 
 mkdir -p "$DIR"
 while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 1; done
@@ -30,43 +23,14 @@ sleep 4
 
 up() { cut -d' ' -f1 /proc/uptime; }
 logline() { echo "$(up)  $*" >> "$LOG"; }
-
-send_frame() {   # args: hex bytes; pads to 66 and writes one frame
-    fmt=""; fn=0
-    for h in "$@"; do fmt="$fmt\\$(printf '%03o' $((0x$h)))"; fn=$((fn+1)); done
-    while [ $fn -lt 66 ]; do fmt="$fmt\\000"; fn=$((fn+1)); done
-    printf "$fmt" > "$DIR/hframe.bin"
-    [ "$(wc -c < "$DIR/hframe.bin")" != "66" ] && { logline "frame size bad, not sent"; return 1; }
-    cat "$DIR/hframe.bin" > "$DEV" 2>/dev/null
-}
-
-logline() { echo "$(up)  $*" >> "$LOG"; }
-
-send_frame() {   # args: hex bytes; pads to 66 and writes one frame
-    fmt=""; fn=0
-    for h in "$@"; do fmt="$fmt\\$(printf '%03o' $((0x$h)))"; fn=$((fn+1)); done
-    while [ $fn -lt 66 ]; do fmt="$fmt\\000"; fn=$((fn+1)); done
-    printf "$fmt" > "$DIR/hframe.bin"
-    [ "$(wc -c < "$DIR/hframe.bin")" != "66" ] && { logline "frame size bad, not sent"; return 1; }
-    cat "$DIR/hframe.bin" > "$DEV" 2>/dev/null
-}
-
-send_frame() {   # args: hex bytes; pads to 66 and writes one frame
-    fmt=""; fn=0
-    for h in "$@"; do fmt="$fmt\\$(printf '%03o' $((0x$h)))"; fn=$((fn+1)); done
-    while [ $fn -lt 66 ]; do fmt="$fmt\\000"; fn=$((fn+1)); done
-    printf "$fmt" > "$DIR/hframe.bin"
-    [ "$(wc -c < "$DIR/hframe.bin")" != "66" ] && { logline "frame size bad, not sent"; return 1; }
-    cat "$DIR/hframe.bin" > "$DEV" 2>/dev/null
-}
-
 sum_hex() { s=0; for h in "$@"; do s=$((s + 0x$h)); done; printf '%02x' $((s & 255)); }
-
-send_auth_start() {
-    body="4f 31 80 38 31 06 4d 49 41 55 54 48"
-    send_frame 32 00 $body $(sum_hex $body)
+send_frame() {   # build a 66-byte frame and write it straight to the device (no temp file)
+    fmt=""; fn=0
+    for h in "$@"; do fmt="$fmt\\$(printf '%03o' $((0x$h)))"; fn=$((fn+1)); done
+    [ $fn -gt 66 ] && { logline "frame >66 bytes, skipped"; return 1; }
+    while [ $fn -lt 66 ]; do fmt="$fmt\\000"; fn=$((fn+1)); done
+    printf "$fmt" > "$DEV" 2>/dev/null
 }
-
 send_feature() {   # $1=cmd hex, $2=value hex  -> short-data feature frame
     body="4e 31 80 38 $1 01 $2"
     send_frame 32 00 $body $(sum_hex $body)
@@ -74,37 +38,31 @@ send_feature() {   # $1=cmd hex, $2=value hex  -> short-data feature frame
 
 logline "## kbd_leds start (caps cmd=$CAPS_CMD on=$CAPS_ON off=$CAPS_OFF; backlight=$BACKLIGHT)"
 
-# find the keyboard input event device (for LED_CAPSL); empty => getevent watches all
+# the keyboard reporting LED_CAPSL is the one to watch
 EVDEV=$(getevent -pl 2>/dev/null | awk '/^add device /{dev=$4} /LED_CAPSL/{print dev; exit}')
-[ -n "$EVDEV" ] || EVDEV=$(awk 'BEGIN{RS="";FS="
-"} /Name="[^"]*[Kk]eyboard"/{for(i=1;i<=NF;i++) if($i ~ /Handlers=/ && match($i,/event[0-9]+/)) {print "/dev/input/" substr($i,RSTART,RLENGTH); exit}}' /proc/bus/input/devices 2>/dev/null)
-logline "caps: EVDEV=${EVDEV:-<all>}"
+logline "caps: EVDEV=${EVDEV:-<none>}"
 
-# Caps Lock watcher: react to EV_LED/LED_CAPSL the kernel emits on each toggle
+# Caps Lock: mirror Android's state (one command per change; the keyboard holds it)
 (
+  cs=off
   getevent -lq $EVDEV 2>/dev/null | while read line; do
       case "$line" in
+          *KEY_CAPSLOCK*DOWN*)
+              # act on the key press itself (Android emits LED_CAPSL only on the NEXT key)
+              if [ "$cs" = "on" ]; then cs=off; send_feature "$CAPS_CMD" "$CAPS_OFF"; logline "caps OFF"
+              else cs=on; send_feature "$CAPS_CMD" "$CAPS_ON"; logline "caps ON"; fi ;;
           *LED_CAPSL*)
+              # authoritative state - correct drift only (usually already matches)
               val=$(echo "$line" | awk '{print $NF}')
               case "$val" in
-                  00000000|0) echo off > "$CAPSF"; send_feature "$CAPS_CMD" "$CAPS_OFF"; logline "caps OFF" ;;
-                  *)          echo on  > "$CAPSF"; send_feature "$CAPS_CMD" "$CAPS_ON";  logline "caps ON"  ;;
+                  00000000|0) [ "$cs" != "off" ] && { cs=off; send_feature "$CAPS_CMD" "$CAPS_OFF"; logline "caps OFF (sync)"; } ;;
+                  *)          [ "$cs" != "on"  ] && { cs=on;  send_feature "$CAPS_CMD" "$CAPS_ON";  logline "caps ON (sync)"; } ;;
               esac ;;
       esac
   done
 ) &
 
-# Keep-alive: the keyboard firmware drops the Caps LED on sleep/typing, and the
-# kernel only emits LED_CAPSL on a state change, so periodically re-assert ON.
-echo off > "$CAPSF"
-(
-  while true; do
-      [ "$(cat "$CAPSF" 2>/dev/null)" = "on" ] && send_feature "$CAPS_CMD" "$CAPS_ON"
-      sleep "$CAPS_REASSERT"
-  done
-) &
-
-# Backlight mirror: keyboard backlight tracks pad screen brightness
+# Backlight: mirror pad screen brightness onto the keyboard backlight (on change)
 if [ "$BACKLIGHT" = "1" ]; then
   BLDIR=$(ls -d /sys/class/backlight/* 2>/dev/null | head -1)
   if [ -n "$BLDIR" ] && [ -r "$BLDIR/brightness" ]; then
@@ -114,13 +72,9 @@ if [ "$BACKLIGHT" = "1" ]; then
     while true; do
       p=$(cat "$BLDIR/brightness" 2>/dev/null)
       case "$p" in ''|*[!0-9]*) sleep "$BL_POLL"; continue;; esac
-      lvl=$(( p * KBD_BL_MAX / PMAX ))
-      [ $lvl -gt $KBD_BL_MAX ] && lvl=$KBD_BL_MAX
-      # re-assert every poll while lit (keyboard drops backlight on sleep, like the Caps LED);
-      # when dark, send once on the transition and then stop.
-      if [ "$lvl" != "$last" ] || [ "$lvl" -gt 0 ]; then
-        send_feature "$BL_CMD" "$(printf '%02x' $lvl)"
-        [ "$lvl" != "$last" ] && { logline "backlight pad=$p kbd=$lvl"; last=$lvl; }
+      lvl=$(( p * KBD_BL_MAX / PMAX )); [ $lvl -gt $KBD_BL_MAX ] && lvl=$KBD_BL_MAX
+      if [ "$lvl" != "$last" ]; then
+        send_feature "$BL_CMD" "$(printf '%02x' $lvl)"; logline "backlight pad=$p kbd=$lvl"; last=$lvl
       fi
       sleep "$BL_POLL"
     done
