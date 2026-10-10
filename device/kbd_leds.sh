@@ -44,34 +44,65 @@ send_feature() {   # $1=cmd hex, $2=value hex
 
 logline "## kbd_leds start (caps $CAPS_CMD; backlight combo ctrl=$BL_NEED_CTRL alt=$BL_NEED_ALT $BL_KEY_DOWN/$BL_KEY_UP)"
 
-CAPSDEV=$(getevent -pl 2>/dev/null | awk '/^add device /{d=$4} /LED_CAPSL/{print d; exit}')
-logline "caps/keys EVDEV=${CAPSDEV:-<none>}"
-
 bl_send() { send_feature "$BL_CMD" "$(printf '%02x' $1)"; logline "backlight=$1"; }
 
-(
-  cs=off; ctrl=0; alt=0; bl=0; bllast=$BL_DEFAULT
-  getevent -lq $CAPSDEV 2>/dev/null | while read a b c rest; do
-      case "$b" in
-          KEY_LEFTCTRL|KEY_RIGHTCTRL) [ "$c" = "DOWN" ] && ctrl=1; [ "$c" = "UP" ] && ctrl=0 ;;
-          KEY_LEFTALT|KEY_RIGHTALT)   [ "$c" = "DOWN" ] && alt=1;  [ "$c" = "UP" ] && alt=0 ;;
-          KEY_CAPSLOCK)
-              [ "$c" = "DOWN" ] && {
-                  if [ "$cs" = "on" ]; then cs=off; send_feature "$CAPS_CMD" "$CAPS_OFF"; logline "caps OFF"
-                  else cs=on; send_feature "$CAPS_CMD" "$CAPS_ON"; logline "caps ON"; fi; } ;;
-          LED_CAPSL)
-              case "$c" in
-                  00000000|0) [ "$cs" != "off" ] && { cs=off; send_feature "$CAPS_CMD" "$CAPS_OFF"; logline "caps OFF (sync)"; } ;;
-                  *)          [ "$cs" != "on"  ] && { cs=on;  send_feature "$CAPS_CMD" "$CAPS_ON";  logline "caps ON (sync)"; } ;;
-              esac ;;
-      esac
-      # backlight combo (modifiers must be held)
-      if [ "$c" = "DOWN" ] && { [ "$BL_NEED_CTRL" = 0 ] || [ "$ctrl" = 1 ]; } && { [ "$BL_NEED_ALT" = 0 ] || [ "$alt" = 1 ]; }; then
-          case "$b" in
-              "$BL_KEY_UP")   bl=$((bl + BL_STEP)); [ $bl -gt $BL_MAX ] && bl=$BL_MAX; bllast=$bl; bl_send $bl ;;
-              "$BL_KEY_DOWN") bl=$((bl - BL_STEP)); [ $bl -lt 0 ] && bl=0; [ $bl -gt 0 ] && bllast=$bl; bl_send $bl ;;
-          esac
-      fi
-  done
-) &
-wait
+# Find the keyboard's evdev node (the one reporting LED_CAPSL). Empty = not present.
+find_capsdev() { getevent -pl 2>/dev/null | awk '/^add device /{d=$4} /LED_CAPSL/{print d; exit}'; }
+
+FIFO=$DIR/leds.fifo
+bl=0; bllast=$BL_DEFAULT          # backlight level persists across reconnects
+
+# One connected session: stream events from $CAPSDEV until the node disappears.
+# A watchdog kills getevent the instant the node is deleted (otherwise getevent
+# busy-spins at ~100% CPU on the dead fd and never picks up the new node), then
+# we loop and re-discover the (possibly renumbered) node.
+run_session() {
+    node=$1
+    rm -f "$FIFO"; mkfifo "$FIFO" 2>/dev/null || { logline "mkfifo failed"; sleep 2; return 1; }
+    getevent -lq "$node" > "$FIFO" 2>/dev/null &
+    gev=$!
+    (   # watchdog
+        while kill -0 "$gev" 2>/dev/null; do
+            ls -l /proc/"$gev"/fd 2>/dev/null | grep -q '(deleted)' && break
+            [ -e "$node" ] || break
+            sleep 1
+        done
+        kill "$gev" 2>/dev/null
+    ) &
+    wd=$!
+
+    cs=off; ctrl=0; alt=0          # per-session key/modifier state
+    while read a b c rest; do
+        case "$b" in
+            KEY_LEFTCTRL|KEY_RIGHTCTRL) [ "$c" = "DOWN" ] && ctrl=1; [ "$c" = "UP" ] && ctrl=0 ;;
+            KEY_LEFTALT|KEY_RIGHTALT)   [ "$c" = "DOWN" ] && alt=1;  [ "$c" = "UP" ] && alt=0 ;;
+            KEY_CAPSLOCK)
+                [ "$c" = "DOWN" ] && {
+                    if [ "$cs" = "on" ]; then cs=off; send_feature "$CAPS_CMD" "$CAPS_OFF"; logline "caps OFF"
+                    else cs=on; send_feature "$CAPS_CMD" "$CAPS_ON"; logline "caps ON"; fi; } ;;
+            LED_CAPSL)
+                case "$c" in
+                    00000000|0) [ "$cs" != "off" ] && { cs=off; send_feature "$CAPS_CMD" "$CAPS_OFF"; logline "caps OFF (sync)"; } ;;
+                    *)          [ "$cs" != "on"  ] && { cs=on;  send_feature "$CAPS_CMD" "$CAPS_ON";  logline "caps ON (sync)"; } ;;
+                esac ;;
+        esac
+        # backlight combo (modifiers must be held)
+        if [ "$c" = "DOWN" ] && { [ "$BL_NEED_CTRL" = 0 ] || [ "$ctrl" = 1 ]; } && { [ "$BL_NEED_ALT" = 0 ] || [ "$alt" = 1 ]; }; then
+            case "$b" in
+                "$BL_KEY_UP")   bl=$((bl + BL_STEP)); [ $bl -gt $BL_MAX ] && bl=$BL_MAX; bllast=$bl; bl_send $bl ;;
+                "$BL_KEY_DOWN") bl=$((bl - BL_STEP)); [ $bl -lt 0 ] && bl=0; [ $bl -gt 0 ] && bllast=$bl; bl_send $bl ;;
+            esac
+        fi
+    done < "$FIFO"
+
+    kill "$wd" "$gev" 2>/dev/null; wait "$gev" 2>/dev/null; rm -f "$FIFO"
+}
+
+# Supervisor: wait for the keyboard, run a session, repeat on disconnect.
+while true; do
+    CAPSDEV=$(find_capsdev)
+    if [ -z "$CAPSDEV" ]; then sleep 2; continue; fi
+    logline "keyboard present: EVDEV=$CAPSDEV"
+    run_session "$CAPSDEV"
+    logline "keyboard gone: EVDEV=$CAPSDEV (restarting watcher)"
+done
