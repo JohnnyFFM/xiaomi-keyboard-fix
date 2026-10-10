@@ -17,6 +17,7 @@ orientation, working **Caps Lock LED**, and a **keyboard-backlight** shortcut.
 | **Arrow keys rotated** 90 degrees | IDC `device.internal = 0` (via `post-fs-data`) |
 | **Caps Lock LED** dead | `kbd_leds.sh` - driven from the Caps key |
 | **Keyboard backlight** dead | `kbd_leds.sh` - **Ctrl+Alt+4 brighter / Ctrl+Alt+3 dimmer** (0 = off) |
+| **One CPU core stuck at 100%** / tablet runs warm | `kbd_no_toucheventcheck.sh` - disables Xiaomi's `toucheventcheck` telemetry daemon, which busy-loops when the keyboard's input node is removed |
 
 Nothing contacts Xiaomi servers and no keys are extracted: the token is computed
 on-device by the signed `devauth` TrustZone trustlet already in your firmware.
@@ -25,6 +26,7 @@ on-device by the signed `devauth` TrustZone trustlet already in your firmware.
 
 ```
 /data/adb/post-fs-data.d/kbd_idc.sh   -> writes the keyboard IDC early (arrow-key + external-device flags)
+/data/adb/post-fs-data.d/kbd_no_toucheventcheck.sh -> disables the toucheventcheck telemetry daemon (100% CPU fix)
 /data/adb/service.d/kbdauth.sh        -> starts midevauthd + kbd_auth.sh + kbd_leds.sh
 /data/adb/service.d/xiaomi_kbd_service.sh -> rebinds the HID while connected (enables typing)
 /data/adb/kbdauth/                    -> midevauthd + libs (you supply) + tokenhelper + kbd_auth.sh + kbd_leds.sh
@@ -35,6 +37,7 @@ on-device by the signed `devauth` TrustZone trustlet already in your firmware.
 * **`kbd_auth.sh`** - drives the keyboard MiAuth handshake and sends the token.
 * **`kbd_leds.sh`** - Caps Lock LED (acts on the Caps key) + backlight (Ctrl+Alt+3/4, level 0-100 via cmd `0x23`).
 * **`xiaomi_kbd_service.sh`** - **required**; without it Android leaves the HID disabled and the keyboard types nothing.
+* **`kbd_no_toucheventcheck.sh`** - stops Xiaomi's `toucheventcheck` (a MiSight *telemetry* daemon, not a driver) at boot. On a custom ROM it busy-loops a CPU core forever once the keyboard's input node is deleted; disabling it has no functional impact. See *Notes*.
 
 ## Requirements
 
@@ -65,17 +68,18 @@ adb push midevauthd libmidevauth.so \
          vendor.xiaomi.hardware.aidl.midevauth-V1-ndk_platform.so \
          tokenhelper device/kbd_auth.sh device/kbd_leds.sh \
          device/service.d-kbdauth.sh device/xiaomi_kbd_service.sh \
-         device/post-fs-data-kbd-idc.sh /data/local/tmp/
+         device/post-fs-data-kbd-idc.sh device/kbd_no_toucheventcheck.sh /data/local/tmp/
 adb shell su -c '
   mkdir -p /data/adb/kbdauth /data/adb/service.d /data/adb/post-fs-data.d
   cp /data/local/tmp/{midevauthd,libmidevauth.so,vendor.xiaomi.hardware.aidl.midevauth-V1-ndk_platform.so,tokenhelper,kbd_auth.sh,kbd_leds.sh} /data/adb/kbdauth/
   cp /data/local/tmp/service.d-kbdauth.sh    /data/adb/service.d/kbdauth.sh
   cp /data/local/tmp/xiaomi_kbd_service.sh   /data/adb/service.d/xiaomi_kbd_service.sh
   cp /data/local/tmp/post-fs-data-kbd-idc.sh /data/adb/post-fs-data.d/kbd_idc.sh
+  cp /data/local/tmp/kbd_no_toucheventcheck.sh /data/adb/post-fs-data.d/kbd_no_toucheventcheck.sh
   chmod 755 /data/adb/kbdauth/midevauthd /data/adb/kbdauth/tokenhelper \
             /data/adb/kbdauth/kbd_auth.sh /data/adb/kbdauth/kbd_leds.sh \
             /data/adb/service.d/kbdauth.sh /data/adb/service.d/xiaomi_kbd_service.sh \
-            /data/adb/post-fs-data.d/kbd_idc.sh
+            /data/adb/post-fs-data.d/kbd_idc.sh /data/adb/post-fs-data.d/kbd_no_toucheventcheck.sh
 '
 ```
 
@@ -105,9 +109,11 @@ since v2 (same source).
 
 ## Uninstall
 ```sh
-su -c 'rm /data/adb/service.d/kbdauth.sh /data/adb/service.d/xiaomi_kbd_service.sh /data/adb/post-fs-data.d/kbd_idc.sh
+su -c 'rm /data/adb/service.d/kbdauth.sh /data/adb/service.d/xiaomi_kbd_service.sh \
+          /data/adb/post-fs-data.d/kbd_idc.sh /data/adb/post-fs-data.d/kbd_no_toucheventcheck.sh
        rm -f /data/system/devices/idc/Vendor_15d9_Product_00a3.idc
-       pkill -f midevauthd; pkill -f kbd_auth.sh; pkill -f kbd_leds.sh'
+       pkill -f midevauthd; pkill -f kbd_auth.sh; pkill -f kbd_leds.sh
+       start toucheventcheck'   # re-enable the telemetry daemon (or just reboot)
 # optional: rm -rf /data/adb/kbdauth
 ```
 
@@ -116,6 +122,7 @@ su -c 'rm /data/adb/service.d/kbdauth.sh /data/adb/service.d/xiaomi_kbd_service.
 * Caps Lock: Android emits `LED_CAPSL` only on the *next* key, and the keyboard applies an LED change only on activity - so we act on the `KEY_CAPSLOCK` press and use `LED_CAPSL` only to correct drift.
 * Arrow keys: fixed via `device.internal = 0` in the IDC; harmless where arrows were already correct.
 * IDC precedence: `/system/usr/idc` beats `/data/system/devices/idc`, so this ships the IDC only in `/data` and uses **no** Magisk module (which would otherwise mount a competing `/system` copy).
+* `toucheventcheck`: Xiaomi's `/odm/bin/toucheventcheck` is a MiSight *touch-telemetry* daemon (not the touch driver - that's the separate `touchfeature-service`). It opens every input node, and when the keyboard's node is deleted (sleep/wake, detach, or our own HID rebind) its dump thread degenerates into a pure-userspace busy-loop that pegs one core forever and never recovers. Since it's a `oneshot` init service, `kbd_no_toucheventcheck.sh` just `stop`s it at boot and init never respawns it. Alternative considered and rejected: restart it on every rebind - that keeps it alive (and it only re-spins on the next sleep/wake), and it's merely telemetry, so disabling outright is cleaner. Logs to `/data/adb/kbd/notec.log`.
 
 ## License
 MIT (see `LICENSE`). Reverse-engineered from the device's own components for interoperability/repair; no Xiaomi binaries or keys included.
