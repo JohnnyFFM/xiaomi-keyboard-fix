@@ -1,5 +1,8 @@
 # Xiaomi Pad 7 Pro keyboard fix (custom ROMs) - v3
 
+
+Ready to Use Magisk Module is provided in the releases section, though the steps to do everything manually is given below.
+
 Make the **Xiaomi Pad 7 / 7 Pro** magnetic keyboard fully work on **crDroid /
 AOSP custom ROMs**: no dropouts, it actually types at boot, correct arrow-key
 orientation, working **Caps Lock LED**, and a **keyboard-backlight** shortcut.
@@ -115,7 +118,7 @@ su -c 'rm /data/adb/service.d/kbdauth.sh /data/adb/service.d/xiaomi_kbd_service.
 * `midevauthd` registers with the **vendor** servicemanager, so `tokenhelper` runs with `LD_LIBRARY_PATH=/vendor/lib64:/system/lib64` (vndbinder).
 * Caps Lock: Android emits `LED_CAPSL` only on the *next* key, and the keyboard applies an LED change only on activity - so we act on the `KEY_CAPSLOCK` press and use `LED_CAPSL` only to correct drift.
 * Arrow keys: fixed via `device.internal = 0` in the IDC; harmless where arrows were already correct.
-* IDC precedence: `/system/usr/idc` beats `/data/system/devices/idc`, so this ships the IDC only in `/data` and uses **no** Magisk module (which would otherwise mount a competing `/system` copy).
+* IDC precedence: `/system/usr/idc` beats `/data/system/devices/idc`, so this ships the IDC only in `/data`.
 
 ## License
-MIT (see `LICENSE`). Reverse-engineered from the device's own components for interoperability/repair; no Xiaomi binaries or keys included.
+MIT (see `LICENSE`). Reverse-engineered from the device's own components for interoperability/repair.
